@@ -11,6 +11,8 @@ State-space trajectories
     plot_trajectory_2d    : 2-D PC-space trajectory
     plot_trajectories_grid: Grid of 2-D trajectory panels (PC1v2, PC2v3, …)
     plot_trajectory_3d    : Interactive 3-D trajectory with matplotlib
+    plot_density_2d       : KDE dwell-time density map
+    plot_flow_field       : KDE density + binned average-velocity arrows
 
 Timeseries
     plot_data_with_template : Heatmap + 1-D timeseries panel
@@ -377,6 +379,191 @@ def plot_trajectory_3d(
     fig.colorbar(sm, ax=ax, label="Time (TR)", shrink=0.6, pad=0.1)
 
     return fig, ax
+
+
+def plot_density_2d(
+    scores,
+    pc_x=1,
+    pc_y=2,
+    bandwidth=None,
+    levels=8,
+    cmap="YlOrRd",
+    contour_color="white",
+    title=None,
+    ax=None,
+    figsize=(5, 4),
+    resolution=150,
+):
+    """
+    KDE dwell-time density map in 2-D PC space.
+
+    Shows where the brain spends the most time rather than plotting every
+    step of the raw trajectory.
+
+    Parameters
+    ----------
+    scores : np.ndarray, shape (T, n_components)
+    pc_x, pc_y : int
+        1-indexed PC axes to plot.
+    bandwidth : float or str or None
+        Passed to ``scipy.stats.gaussian_kde`` as *bw_method*.
+        None uses Scott's rule.
+    levels : int
+        Number of iso-density contour lines overlaid on the map.
+    cmap : str
+    contour_color : str
+    title : str or None
+    ax : Axes or None
+    figsize : tuple
+    resolution : int
+        Grid resolution for KDE evaluation.
+
+    Returns
+    -------
+    ax : Axes
+    """
+    from scipy.stats import gaussian_kde
+
+    x = scores[:, pc_x - 1]
+    y = scores[:, pc_y - 1]
+
+    xgrid = np.linspace(x.min(), x.max(), resolution)
+    ygrid = np.linspace(y.min(), y.max(), resolution)
+    xx, yy = np.meshgrid(xgrid, ygrid)
+
+    kde = gaussian_kde(np.vstack([x, y]), bw_method=bandwidth)
+    density = kde(np.vstack([xx.ravel(), yy.ravel()])).reshape(xx.shape)
+
+    if ax is None:
+        _, ax = plt.subplots(figsize=figsize)
+
+    im = ax.pcolormesh(xx, yy, density, cmap=cmap, shading="gouraud")
+    if levels > 0:
+        ax.contour(xx, yy, density, levels=levels,
+                   colors=contour_color, linewidths=0.6, alpha=0.55)
+
+    ax.set_xlabel(f"PC {pc_x}")
+    ax.set_ylabel(f"PC {pc_y}")
+    ax.set_title(title or f"Dwell-time density — PC {pc_x} vs PC {pc_y}")
+    ax.spines[["top", "right"]].set_visible(False)
+    plt.colorbar(im, ax=ax, label="Density (dwell time)", shrink=0.8)
+
+    return ax
+
+
+def plot_flow_field(
+    scores,
+    pc_x=1,
+    pc_y=2,
+    n_bins=15,
+    min_count=2,
+    bandwidth=None,
+    cmap="YlOrRd",
+    arrow_color="white",
+    arrow_scale=None,
+    title=None,
+    ax=None,
+    figsize=(5, 4),
+    resolution=150,
+):
+    """
+    KDE density background with binned average-velocity arrows.
+
+    Combines dwell-time information (background colour) with the dominant
+    direction of traversal (arrows) so that the most-used paths stand out.
+
+    Parameters
+    ----------
+    scores : np.ndarray, shape (T, n_components)
+    pc_x, pc_y : int
+        1-indexed PC axes.
+    n_bins : int
+        Number of bins along each axis for the velocity grid.
+    min_count : int
+        Minimum number of timepoints in a bin to draw an arrow.
+        Suppresses arrows in rarely visited regions.
+    bandwidth : float or str or None
+        KDE bandwidth (Scott's rule if None).
+    cmap : str
+    arrow_color : str
+    arrow_scale : float or None
+        Passed to ``ax.quiver`` *scale*. Smaller = longer arrows.
+        Defaults to ``n_bins * 2``.
+    title : str or None
+    ax : Axes or None
+    figsize : tuple
+    resolution : int
+        Grid resolution for KDE background.
+
+    Returns
+    -------
+    ax : Axes
+    """
+    from scipy.stats import gaussian_kde
+
+    x = scores[:, pc_x - 1]
+    y = scores[:, pc_y - 1]
+
+    # --- KDE density background ---
+    xgrid = np.linspace(x.min(), x.max(), resolution)
+    ygrid = np.linspace(y.min(), y.max(), resolution)
+    xx, yy = np.meshgrid(xgrid, ygrid)
+
+    kde = gaussian_kde(np.vstack([x, y]), bw_method=bandwidth)
+    density = kde(np.vstack([xx.ravel(), yy.ravel()])).reshape(xx.shape)
+
+    if ax is None:
+        _, ax = plt.subplots(figsize=figsize)
+
+    im = ax.pcolormesh(xx, yy, density, cmap=cmap, shading="gouraud")
+
+    # --- Binned velocity field ---
+    dx = np.diff(x)
+    dy = np.diff(y)
+    xm = (x[:-1] + x[1:]) / 2   # midpoint positions
+    ym = (y[:-1] + y[1:]) / 2
+
+    xedges = np.linspace(x.min(), x.max(), n_bins + 1)
+    yedges = np.linspace(y.min(), y.max(), n_bins + 1)
+    xc = (xedges[:-1] + xedges[1:]) / 2
+    yc = (yedges[:-1] + yedges[1:]) / 2
+
+    xi = np.clip(np.digitize(xm, xedges) - 1, 0, n_bins - 1)
+    yi = np.clip(np.digitize(ym, yedges) - 1, 0, n_bins - 1)
+
+    counts = np.zeros((n_bins, n_bins))
+    su = np.zeros((n_bins, n_bins))
+    sv = np.zeros((n_bins, n_bins))
+    for dxi, dyi, xi_, yi_ in zip(dx, dy, xi, yi):
+        counts[yi_, xi_] += 1
+        su[yi_, xi_] += dxi
+        sv[yi_, xi_] += dyi
+
+    valid = counts >= min_count
+    u = np.where(valid, su / np.where(counts > 0, counts, 1), np.nan)
+    v = np.where(valid, sv / np.where(counts > 0, counts, 1), np.nan)
+
+    # Normalise to unit length so arrow size reflects direction only
+    mag = np.sqrt(u ** 2 + v ** 2)
+    with np.errstate(invalid="ignore"):
+        u_n = u / mag
+        v_n = v / mag
+
+    XXc, YYc = np.meshgrid(xc, yc)
+    scale = arrow_scale if arrow_scale is not None else n_bins * 2
+    ax.quiver(
+        XXc[valid], YYc[valid], u_n[valid], v_n[valid],
+        color=arrow_color, alpha=0.75,
+        scale=scale, width=0.004, headwidth=4,
+    )
+
+    ax.set_xlabel(f"PC {pc_x}")
+    ax.set_ylabel(f"PC {pc_y}")
+    ax.set_title(title or f"State-space flow — PC {pc_x} vs PC {pc_y}")
+    ax.spines[["top", "right"]].set_visible(False)
+    plt.colorbar(im, ax=ax, label="Density (dwell time)", shrink=0.8)
+
+    return ax
 
 
 # ---------------------------------------------------------------------------
