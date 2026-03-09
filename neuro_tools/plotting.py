@@ -13,6 +13,8 @@ State-space trajectories
     plot_trajectory_3d    : Interactive 3-D trajectory with matplotlib
     plot_density_2d       : KDE dwell-time density map
     plot_flow_field       : KDE density + binned average-velocity arrows
+    plot_streamlines      : KDE density + continuous streamlines (topology)
+    plot_landscape_3d     : 3-D surface of KDE density (energy landscape)
 
 Timeseries
     plot_data_with_template : Heatmap + 1-D timeseries panel
@@ -564,6 +566,205 @@ def plot_flow_field(
     plt.colorbar(im, ax=ax, label="Density (dwell time)", shrink=0.8)
 
     return ax
+
+
+def plot_streamlines(
+    scores,
+    pc_x=1,
+    pc_y=2,
+    n_grid=30,
+    bandwidth=None,
+    stream_density=1.5,
+    lw=1.2,
+    cmap="YlOrRd",
+    stream_color="white",
+    title=None,
+    ax=None,
+    figsize=(5, 4),
+    resolution=150,
+):
+    """
+    KDE density background with continuous streamlines.
+
+    Streamlines follow the average velocity field interpolated onto a regular
+    grid, giving a cleaner topographic picture than discrete arrows.
+
+    Parameters
+    ----------
+    scores : np.ndarray, shape (T, n_components)
+    pc_x, pc_y : int
+        1-indexed PC axes.
+    n_grid : int
+        Resolution of the velocity grid used for streamline integration.
+        Higher = more detailed but slower.
+    bandwidth : float or str or None
+        KDE bandwidth (Scott's rule if None).
+    stream_density : float
+        Controls how closely packed the streamlines are (passed to
+        ``ax.streamplot``).
+    lw : float
+        Streamline line width.
+    cmap : str
+    stream_color : str
+    title : str or None
+    ax : Axes or None
+    figsize : tuple
+    resolution : int
+        Grid resolution for KDE background.
+
+    Returns
+    -------
+    ax : Axes
+    """
+    from scipy.stats import gaussian_kde
+    from scipy.interpolate import griddata
+
+    x = scores[:, pc_x - 1]
+    y = scores[:, pc_y - 1]
+
+    # --- KDE density background ---
+    xgrid = np.linspace(x.min(), x.max(), resolution)
+    ygrid = np.linspace(y.min(), y.max(), resolution)
+    xx, yy = np.meshgrid(xgrid, ygrid)
+
+    kde = gaussian_kde(np.vstack([x, y]), bw_method=bandwidth)
+    density = kde(np.vstack([xx.ravel(), yy.ravel()])).reshape(xx.shape)
+
+    if ax is None:
+        _, ax = plt.subplots(figsize=figsize)
+
+    ax.pcolormesh(xx, yy, density, cmap=cmap, shading="gouraud")
+
+    # --- Velocity field interpolated onto regular grid ---
+    dx = np.diff(x)
+    dy = np.diff(y)
+    xm = (x[:-1] + x[1:]) / 2
+    ym = (y[:-1] + y[1:]) / 2
+
+    xg = np.linspace(x.min(), x.max(), n_grid)
+    yg = np.linspace(y.min(), y.max(), n_grid)
+    XXg, YYg = np.meshgrid(xg, yg)
+
+    U = griddata((xm, ym), dx, (XXg, YYg), method="linear", fill_value=0.0)
+    V = griddata((xm, ym), dy, (XXg, YYg), method="linear", fill_value=0.0)
+
+    # Scale line width by local speed so fast transitions are thicker
+    speed = np.sqrt(U ** 2 + V ** 2)
+    max_speed = speed.max() if speed.max() > 0 else 1.0
+    lw_scaled = lw + 1.5 * speed / max_speed
+
+    ax.streamplot(
+        xg, yg, U, V,
+        density=stream_density,
+        color=stream_color,
+        linewidth=lw_scaled,
+        arrowsize=1.0,
+        arrowstyle="->",
+    )
+
+    ax.set_xlabel(f"PC {pc_x}")
+    ax.set_ylabel(f"PC {pc_y}")
+    ax.set_title(title or f"State-space streamlines — PC {pc_x} vs PC {pc_y}")
+    ax.spines[["top", "right"]].set_visible(False)
+
+    return ax
+
+
+def plot_landscape_3d(
+    scores,
+    pc_x=1,
+    pc_y=2,
+    bandwidth=None,
+    cmap="YlOrRd",
+    resolution=80,
+    title=None,
+    figsize=(6, 5),
+    elev=35,
+    azim=45,
+    mark_peaks=True,
+    n_peaks=3,
+    peak_size=60,
+):
+    """
+    3-D surface of KDE dwell-time density — the state-space energy landscape.
+
+    Height encodes how often the brain visits each region of PC space.
+    Local maxima (attractor states) are optionally marked with red dots.
+
+    Parameters
+    ----------
+    scores : np.ndarray, shape (T, n_components)
+    pc_x, pc_y : int
+        1-indexed PC axes.
+    bandwidth : float or str or None
+        KDE bandwidth (Scott's rule if None).
+    cmap : str
+    resolution : int
+        Grid resolution (higher = smoother surface, slower).
+    title : str or None
+    figsize : tuple
+    elev, azim : float
+        Initial 3-D viewing angles.
+    mark_peaks : bool
+        Scatter red markers at the top *n_peaks* local density maxima.
+    n_peaks : int
+    peak_size : float
+        Marker size for peak dots.
+
+    Returns
+    -------
+    fig, ax : Figure and Axes3D
+    """
+    from scipy.stats import gaussian_kde
+    from scipy.ndimage import maximum_filter
+
+    x = scores[:, pc_x - 1]
+    y = scores[:, pc_y - 1]
+
+    xgrid = np.linspace(x.min(), x.max(), resolution)
+    ygrid = np.linspace(y.min(), y.max(), resolution)
+    xx, yy = np.meshgrid(xgrid, ygrid)
+
+    kde = gaussian_kde(np.vstack([x, y]), bw_method=bandwidth)
+    density = kde(np.vstack([xx.ravel(), yy.ravel()])).reshape(xx.shape)
+
+    fig = plt.figure(figsize=figsize)
+    ax = fig.add_subplot(111, projection="3d")
+
+    ax.plot_surface(
+        xx, yy, density,
+        cmap=cmap, alpha=0.90,
+        linewidth=0, antialiased=True,
+        rcount=resolution, ccount=resolution,
+    )
+
+    if mark_peaks:
+        neighbourhood = max(3, resolution // 10)
+        local_max = density == maximum_filter(density, size=neighbourhood)
+        peak_idx = np.argwhere(local_max)
+        peak_vals = density[local_max]
+        top = np.argsort(peak_vals)[::-1][:n_peaks]
+        for i in top:
+            r, c = peak_idx[i]
+            ax.scatter(
+                xgrid[c], ygrid[r], density[r, c],
+                color="crimson", s=peak_size, zorder=6, depthshade=False,
+            )
+
+    ax.set_xlabel(f"PC {pc_x}")
+    ax.set_ylabel(f"PC {pc_y}")
+    ax.set_zlabel("Density")
+    ax.set_title(title or f"State-space landscape — PC {pc_x} vs PC {pc_y}")
+    ax.view_init(elev=elev, azim=azim)
+
+    sm = plt.cm.ScalarMappable(
+        cmap=cmap,
+        norm=mcolors.Normalize(vmin=density.min(), vmax=density.max()),
+    )
+    sm.set_array([])
+    fig.colorbar(sm, ax=ax, label="Dwell-time density", shrink=0.55, pad=0.1)
+
+    return fig, ax
 
 
 # ---------------------------------------------------------------------------
