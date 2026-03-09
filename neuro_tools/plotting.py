@@ -15,6 +15,8 @@ State-space trajectories
     plot_flow_field       : KDE density + binned average-velocity arrows
     plot_streamlines      : KDE density + continuous streamlines (topology)
     plot_landscape_3d     : 3-D surface of KDE density (energy landscape)
+    plot_phase_portrait   : Full phase portrait — density, streamlines,
+                            nullclines, and classified fixed points
 
 Timeseries
     plot_data_with_template : Heatmap + 1-D timeseries panel
@@ -765,6 +767,159 @@ def plot_landscape_3d(
     fig.colorbar(sm, ax=ax, label="Dwell-time density", shrink=0.55, pad=0.1)
 
     return fig, ax
+
+
+# Fixed-point marker styles
+_FP_STYLES = {
+    "stable_node":     dict(marker="o", color="#00E676", ms=11, label="Stable node"),
+    "unstable_node":   dict(marker="o", color="#FF1744", ms=11, label="Unstable node"),
+    "stable_spiral":   dict(marker="*", color="#00E676", ms=15, label="Stable spiral"),
+    "unstable_spiral": dict(marker="*", color="#FF1744", ms=15, label="Unstable spiral"),
+    "saddle":          dict(marker="D", color="#FF9100", ms=10, label="Saddle point"),
+    "center":          dict(marker="s", color="#00B0FF", ms=10, label="Center"),
+}
+
+
+def plot_phase_portrait(
+    scores,
+    pc_x=1,
+    pc_y=2,
+    fixed_points=None,
+    show_nullclines=True,
+    n_grid=35,
+    bandwidth=None,
+    stream_density=1.3,
+    cmap="YlOrRd",
+    title=None,
+    ax=None,
+    figsize=(6, 5),
+    resolution=150,
+):
+    """
+    Full phase portrait: KDE density background, streamlines, nullclines,
+    and classified fixed points.
+
+    Combines all topographic elements into one canonical dynamical-systems
+    figure.  Fixed points are coloured and shaped by type (stable node,
+    unstable node, saddle, stable/unstable spiral, center).
+
+    Parameters
+    ----------
+    scores : np.ndarray, shape (T, n_components)
+    pc_x, pc_y : int
+        1-indexed PC axes.
+    fixed_points : list of dict or None
+        Output of :func:`~neuro_tools.dynamics.find_fixed_points`.
+        If None, fixed points are not drawn.
+    show_nullclines : bool
+        Overlay ``dx/dt = 0`` (cyan dashed) and ``dy/dt = 0`` (gold dashed)
+        nullclines.  Their intersections are the fixed points.
+    n_grid : int
+        Grid resolution for velocity field and nullclines.
+    bandwidth : float or str or None
+        KDE bandwidth for the density background.
+    stream_density : float
+        Streamline density (passed to ``ax.streamplot``).
+    cmap : str
+    title : str or None
+    ax : Axes or None
+    figsize : tuple
+    resolution : int
+        KDE background grid resolution.
+
+    Returns
+    -------
+    ax : Axes
+    """
+    from scipy.interpolate import griddata
+    from scipy.stats import gaussian_kde
+    from matplotlib.lines import Line2D
+
+    x = scores[:, pc_x - 1]
+    y = scores[:, pc_y - 1]
+
+    # --- KDE density background ---
+    xgrid = np.linspace(x.min(), x.max(), resolution)
+    ygrid = np.linspace(y.min(), y.max(), resolution)
+    xx, yy = np.meshgrid(xgrid, ygrid)
+    kde = gaussian_kde(np.vstack([x, y]), bw_method=bandwidth)
+    density = kde(np.vstack([xx.ravel(), yy.ravel()])).reshape(xx.shape)
+
+    if ax is None:
+        _, ax = plt.subplots(figsize=figsize)
+
+    ax.pcolormesh(xx, yy, density, cmap=cmap, shading="gouraud")
+
+    # --- Velocity field + streamlines ---
+    dx = np.diff(x)
+    dy = np.diff(y)
+    xm = (x[:-1] + x[1:]) / 2
+    ym = (y[:-1] + y[1:]) / 2
+
+    xg = np.linspace(x.min(), x.max(), n_grid)
+    yg = np.linspace(y.min(), y.max(), n_grid)
+    XXg, YYg = np.meshgrid(xg, yg)
+
+    U = griddata((xm, ym), dx, (XXg, YYg), method="linear", fill_value=0.0)
+    V = griddata((xm, ym), dy, (XXg, YYg), method="linear", fill_value=0.0)
+
+    speed = np.sqrt(U ** 2 + V ** 2)
+    lw = 0.8 + 1.5 * speed / (speed.max() or 1.0)
+
+    ax.streamplot(
+        xg, yg, U, V,
+        density=stream_density, color="white",
+        linewidth=lw, arrowsize=0.9, arrowstyle="->",
+    )
+
+    # --- Nullclines ---
+    legend_handles = []
+    if show_nullclines:
+        cs_u = ax.contour(XXg, YYg, U, levels=[0],
+                          colors="#00CFFF", linewidths=1.8,
+                          linestyles="--", alpha=0.9)
+        cs_v = ax.contour(XXg, YYg, V, levels=[0],
+                          colors="#FFD700", linewidths=1.8,
+                          linestyles="--", alpha=0.9)
+        legend_handles += [
+            Line2D([0], [0], color="#00CFFF", lw=1.8, ls="--",
+                   label=r"$\dot{x}=0$ nullcline"),
+            Line2D([0], [0], color="#FFD700", lw=1.8, ls="--",
+                   label=r"$\dot{y}=0$ nullcline"),
+        ]
+
+    # --- Fixed points ---
+    if fixed_points:
+        seen_types = set()
+        for fp in fixed_points:
+            style = _FP_STYLES.get(
+                fp["type"],
+                dict(marker="x", color="white", ms=10, label=fp["type"]),
+            )
+            label = style["label"] if fp["type"] not in seen_types else None
+            h = ax.plot(
+                fp["x"], fp["y"],
+                marker=style["marker"], color=style["color"],
+                ms=style["ms"], mec="black", mew=0.8,
+                ls="none", zorder=10, label=label,
+            )
+            if label:
+                legend_handles.append(h[0])
+            seen_types.add(fp["type"])
+
+    if legend_handles:
+        ax.legend(
+            handles=legend_handles,
+            fontsize=8, framealpha=0.35,
+            loc="upper right", frameon=True,
+        )
+
+    ax.set_xlabel(f"PC {pc_x}")
+    ax.set_ylabel(f"PC {pc_y}")
+    ax.set_title(title or f"Phase portrait — PC {pc_x} vs PC {pc_y}")
+    ax.spines[["top", "right"]].set_visible(False)
+
+    return ax
 
 
 # ---------------------------------------------------------------------------

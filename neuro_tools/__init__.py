@@ -7,7 +7,8 @@ atlas       : Atlas loading, resampling, and ROI mask creation
 io          : ROI data extraction from whole-brain arrays
 decomposition : PCA / dimensionality reduction helpers
 plotting    : Brain surface plots and trajectory visualisations
+dynamics    : Dynamical-systems analysis (fixed points, phase portrait)
 utils       : General-purpose helpers (z-scoring, correlation, etc.)
 """
 
-from . import atlas, io, decomposition, plotting, utils
+from . import atlas, io, decomposition, plotting, dynamics, utils
